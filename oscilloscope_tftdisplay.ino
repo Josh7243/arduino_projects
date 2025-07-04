@@ -12,8 +12,9 @@
 
  Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
 
- #define NUM_POINTS tft.width() // Number of points to display on the X-axis
- int values[NUM_POINTS];       // Array to store analog values for plotting
+ // We will define NUM_POINTS after tft.width() is known in setup()
+ int NUM_POINTS; // Now just a variable, not a preprocessor define
+ int *values;    // A pointer, we'll allocate memory for the array dynamically
 
  // Define your potentiometer pins
  const int potPin = 34;   // For the main waveform
@@ -31,6 +32,23 @@
    Serial.println("ready");
    tft.setFont(&FreeSerif12pt7b); // Set your preferred font
    tft.setTextWrap(false); // Disable text wrapping
+
+   // --- FIX START ---
+   // Now that tft.width() is known (after tft.init() and tft.setRotation()),
+   // we can set NUM_POINTS and allocate memory for 'values'.
+   NUM_POINTS = tft.width();
+   values = (int *) malloc(NUM_POINTS * sizeof(int)); // Allocate memory for the array
+
+   // It's good practice to check if allocation was successful
+   if (values == NULL) {
+     Serial.println("Failed to allocate memory for 'values' array!");
+     while (true); // Halt execution if memory allocation fails
+   }
+   // Initialize values to 0 to avoid garbage data on first plot
+   for (int i = 0; i < NUM_POINTS; i++) {
+     values[i] = 0;
+   }
+   // --- FIX END ---
  }
 
  void drawVoltageMarkers() {
@@ -88,9 +106,6 @@
      // The X-coordinate for plotting starts after the voltage markers (e.g., 40 pixels in)
      tft.drawLine(i - 1 + 40, values[i - 1], i + 40, values[i], ST77XX_WHITE);
    }
-
-   // No direct tft.display() equivalent for ST7789 like SSD1306.
-   // Drawing functions immediately update the display.
 
    // Serial output for debugging
    Serial.print("Analog 1: ");
