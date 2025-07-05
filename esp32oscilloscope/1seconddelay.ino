@@ -28,6 +28,15 @@
  const int Y_MARGIN_TOP = 10;
  const int Y_MARGIN_BOTTOM = 10;
 
+ // --- Variables for controlling update frequency based on delay ---
+ unsigned long loopCounter = 0;
+ float updateRateFactor = 1.0; // How many 'sampleDelay' iterations before update (e.g., 1.0 means every iteration)
+ const float MIN_UPDATE_RATE_FACTOR = 1.0; // Minimum factor (update every iteration)
+ const float MAX_UPDATE_RATE_FACTOR = 50.0; // Maximum factor (update every X iterations for very fast samples)
+ const float DELAY_THRESHOLD_LOW = 5.0; // If sampleDelay is below this, start increasing updateRateFactor
+ const float DELAY_THRESHOLD_HIGH = 100.0; // If sampleDelay is above this, updateRateFactor is MIN_UPDATE_RATE_FACTOR
+                                        // Adjust these thresholds to fine-tune the feel.
+
  void setup() {
    Serial.begin(9600);
    delay(100);
@@ -98,44 +107,67 @@
    if (sampleDelay < 1) sampleDelay = 1; // Ensure minimum 1ms delay
 
    // Scale the analog value to fit the screen's effective plotting height
-   // 0 to 4095 (12-bit ADC) maps to (bottom - margin) to (top + margin)
    int scaledValue = map(analogValue, 0, 4095,
                          tft.height() - 1 - Y_MARGIN_BOTTOM, // Bottom pixel of plotting area
                          Y_MARGIN_TOP);                     // Top pixel of plotting area
 
-   // --- Store current 'values' into 'lastValues' BEFORE shifting 'values' ---
+   // --- Update Data (always happens) ---
+   // Store current 'values' into 'lastValues' BEFORE shifting 'values'
+   // This is crucial for the erase-draw technique to always have the previous frame
    memmove(lastValues, values, NUM_POINTS * sizeof(int));
 
-   // --- Shift current data points and add new one ---
+   // Shift current data points and add new one
    memmove(values, values + 1, (NUM_POINTS - 1) * sizeof(int));
    values[NUM_POINTS - 1] = scaledValue;
 
-   // --- Drawing: Erase old waveform, then draw new waveform ---
+   // --- Determine Display Update Frequency ---
+   // Map sampleDelay to updateRateFactor
+   if (sampleDelay < DELAY_THRESHOLD_LOW) {
+     // For very fast sampling, update less often
+     updateRateFactor = map(sampleDelay, 1.0, DELAY_THRESHOLD_LOW, MAX_UPDATE_RATE_FACTOR, MIN_UPDATE_RATE_FACTOR);
+     updateRateFactor = constrain(updateRateFactor, MIN_UPDATE_RATE_FACTOR, MAX_UPDATE_RATE_FACTOR); // Ensure it's within bounds
+   } else if (sampleDelay > DELAY_THRESHOLD_HIGH) {
+     // For very slow sampling, update every iteration
+     updateRateFactor = MIN_UPDATE_RATE_FACTOR;
+   } else {
+     // Linear interpolation between MIN and MAX factors in the middle range
+     updateRateFactor = map(sampleDelay, DELAY_THRESHOLD_LOW, DELAY_THRESHOLD_HIGH, MAX_UPDATE_RATE_FACTOR, MIN_UPDATE_RATE_FACTOR);
+     updateRateFactor = constrain(updateRateFactor, MIN_UPDATE_RATE_FACTOR, MAX_UPDATE_RATE_FACTOR);
+   }
 
-   // Erase the previous waveform by drawing it in black
-   // Draw slightly thicker to ensure complete erasure of old pixels
-   for (int i = 1; i < NUM_POINTS; i++) {
-     tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, lastValues[i - 1], i + WAVEFORM_X_OFFSET, lastValues[i], ST77XX_BLACK);
-     // Draw adjacent pixels for "thickness" to ensure erase
-     // Only add thickness if the line isn't perfectly horizontal
-     if (lastValues[i - 1] != lastValues[i]) {
-       tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, lastValues[i - 1] + 1, i + WAVEFORM_X_OFFSET, lastValues[i] + 1, ST77XX_BLACK);
-       tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, lastValues[i - 1] - 1, i + WAVEFORM_X_OFFSET, lastValues[i] - 1, ST77XX_BLACK);
+   // --- Display Update Logic (conditional) ---
+   loopCounter++; // Increment the counter on each loop iteration
+
+   // Update display only if enough iterations have passed
+   if (loopCounter >= updateRateFactor) {
+     loopCounter = 0; // Reset the counter
+
+     // Erase the previous waveform by drawing it in black
+     // Draw slightly thicker to ensure complete erasure of old pixels
+     for (int i = 1; i < NUM_POINTS; i++) {
+       tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, lastValues[i - 1], i + WAVEFORM_X_OFFSET, lastValues[i], ST77XX_BLACK);
+       // Draw adjacent pixels for "thickness" to ensure erase
+       if (lastValues[i - 1] != lastValues[i]) {
+         tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, lastValues[i - 1] + 1, i + WAVEFORM_X_OFFSET, lastValues[i] + 1, ST77XX_BLACK);
+         tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, lastValues[i - 1] - 1, i + WAVEFORM_X_OFFSET, lastValues[i] - 1, ST77XX_BLACK);
+       }
      }
+
+     // Draw the new waveform in white
+     for (int i = 1; i < NUM_POINTS; i++) {
+       tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, values[i - 1], i + WAVEFORM_X_OFFSET, values[i], ST77XX_WHITE);
+     }
+
+     // Serial output for debugging (only print when display updates)
+     Serial.print("Analog 1: ");
+     Serial.print(analogValue);
+     Serial.print(", Analog 2: ");
+     Serial.print(analogValue2);
+     Serial.print(", Sample Delay: ");
+     Serial.print(sampleDelay);
+     Serial.print(", Update Factor: ");
+     Serial.println(updateRateFactor);
    }
 
-   // Draw the new waveform in white
-   for (int i = 1; i < NUM_POINTS; i++) {
-     tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, values[i - 1], i + WAVEFORM_X_OFFSET, values[i], ST77XX_WHITE);
-   }
-
-   // Serial output for debugging
-   Serial.print("Analog 1: ");
-   Serial.print(analogValue);
-   Serial.print(", Analog 2: ");
-   Serial.print(analogValue2);
-   Serial.print(", Sample Delay: ");
-   Serial.println(sampleDelay);
-
-   delay(sampleDelay); // This delay directly controls the animation speed
+   delay(sampleDelay); // This delay controls the rate of data acquisition
  }
