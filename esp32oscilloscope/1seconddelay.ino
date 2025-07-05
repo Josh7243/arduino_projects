@@ -15,7 +15,8 @@
  // We will define NUM_POINTS after tft.width() is known in setup()
  int NUM_POINTS; // Now just a variable, not a preprocessor define
  int *values;    // A pointer, we'll allocate memory for the array dynamically
- int *lastValues; // To store the previous frame's values for erasing
+ // We no longer need lastValues for the "erase old, draw new" technique for the waveform
+ // int *lastValues; // To store the previous frame's values for erasing
 
  // Define your potentiometer pins
  const int potPin = 34;   // For the main waveform
@@ -45,17 +46,18 @@
    // we can set NUM_POINTS and allocate memory for 'values'.
    NUM_POINTS = tft.width() - WAVEFORM_X_OFFSET; // Adjust for the offset
    values = (int *) malloc(NUM_POINTS * sizeof(int)); // Allocate memory for the array
-   lastValues = (int *) malloc(NUM_POINTS * sizeof(int)); // Allocate memory for last values
+   // We only need one array now as we clear the area instead of erasing old line
+   // lastValues is no longer needed
+   // lastValues = (int *) malloc(NUM_POINTS * sizeof(int)); // Allocate memory for last values
 
    // It's good practice to check if allocation was successful
-   if (values == NULL || lastValues == NULL) {
-     Serial.println("Failed to allocate memory for 'values' or 'lastValues' array!");
+   if (values == NULL) { // Only check for 'values' now
+     Serial.println("Failed to allocate memory for 'values' array!");
      while (true); // Halt execution if memory allocation fails
    }
    // Initialize values to 0 to avoid garbage data on first plot
    for (int i = 0; i < NUM_POINTS; i++) {
      values[i] = tft.height() - 1; // Start with line at 0V (bottom)
-     lastValues[i] = tft.height() - 1; // Initialize lastValues also
    }
 
    // Draw voltage markers only once in setup()
@@ -90,8 +92,7 @@
    int analogValue = analogRead(potPin);
    int analogValue2 = analogRead(potPin2);
 
-   // This delayValue now only affects the *sampling rate* of the analog input,
-   // not the display update rate.
+   // This sampleDelay controls how fast you acquire new data.
    float sampleDelay = pow(2, (analogValue2 / 4095.0) * log2(1000)) - 1;
    if (sampleDelay < 1) sampleDelay = 1;
 
@@ -99,9 +100,6 @@
    int scaledValue = map(analogValue, 0, 4095, tft.height() - 1, 0);
 
    // --- Data Acquisition and Shifting (happens continuously) ---
-   // Store current 'values' into 'lastValues' before shifting
-   memmove(lastValues, values, NUM_POINTS * sizeof(int));
-
    // Shift all existing values to the left
    memmove(values, values + 1, (NUM_POINTS - 1) * sizeof(int));
    // Add the new scaled value to the end of the array
@@ -114,12 +112,13 @@
      // Save the last time we updated the display
      previousMillis = currentMillis;
 
-     // --- Drawing Optimization (only happens when interval is met) ---
-     // Erase the old waveform
-     for (int i = 1; i < NUM_POINTS; i++) {
-       // Erase previous line segment with black
-       tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, lastValues[i - 1], i + WAVEFORM_X_OFFSET, lastValues[i], ST77XX_BLACK);
-     }
+     // --- Drawing Optimization: Clear only the plotting area ---
+     // Clear the rectangular area where the waveform is drawn
+     // X-start: WAVEFORM_X_OFFSET
+     // Y-start: 0 (top of screen)
+     // Width: NUM_POINTS (which is tft.width() - WAVEFORM_X_OFFSET)
+     // Height: tft.height() (full height of plotting area)
+     tft.fillRect(WAVEFORM_X_OFFSET, 0, NUM_POINTS, tft.height(), ST77XX_BLACK);
 
      // Draw the new waveform
      for (int i = 1; i < NUM_POINTS; i++) {
