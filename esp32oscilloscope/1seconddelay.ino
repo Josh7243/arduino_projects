@@ -25,7 +25,7 @@
 
  // Margins for voltage markers to prevent text/ticks from being cut off
  const int Y_MARGIN_TOP = 10;
- const int int Y_MARGIN_BOTTOM = 10;
+ const int Y_MARGIN_BOTTOM = 10; // Corrected: Removed extra 'int'
 
  // --- Variables for controlling data acquisition rate per point ---
  unsigned long previousSampleMillis = 0; // When the last point was added to the graph
