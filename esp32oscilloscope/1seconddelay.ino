@@ -14,28 +14,30 @@
 
  // We will define NUM_POINTS based on the effective width after rotation
  int NUM_POINTS;
- int *values;     // Current waveform data
- int *lastValues; // Previous waveform data for erasing
+ int *values;    // Current waveform data
 
  // Define your potentiometer pins
  const int potPin = 34;   // For the main waveform analog input
- const int potPin2 = 33;  // For controlling the delay/sample rate
+ const int potPin2 = 33;  // For controlling msPerPoint (graph speed)
 
  // Offset for the waveform to leave space for voltage markers on the left
  const int WAVEFORM_X_OFFSET = 40;
 
  // Margins for voltage markers to prevent text/ticks from being cut off
  const int Y_MARGIN_TOP = 10;
- const int Y_MARGIN_BOTTOM = 10;
+ const int int Y_MARGIN_BOTTOM = 10;
 
- // --- Variables for controlling update frequency based on delay ---
- unsigned long loopCounter = 0;
- float updateRateFactor = 1.0; // How many 'sampleDelay' iterations before update (e.g., 1.0 means every iteration)
- const float MIN_UPDATE_RATE_FACTOR = 1.0; // Minimum factor (update every iteration)
- const float MAX_UPDATE_RATE_FACTOR = 50.0; // Maximum factor (update every X iterations for very fast samples)
- const float DELAY_THRESHOLD_LOW = 5.0; // If sampleDelay is below this, start increasing updateRateFactor
- const float DELAY_THRESHOLD_HIGH = 100.0; // If sampleDelay is above this, updateRateFactor is MIN_UPDATE_RATE_FACTOR
-                                        // Adjust these thresholds to fine-tune the feel.
+ // --- Variables for controlling data acquisition rate per point ---
+ unsigned long previousSampleMillis = 0; // When the last point was added to the graph
+ float msPerPoint = 100.0;             // Milliseconds each point on the graph represents (0.1 to 1000 seconds)
+
+ // Raw ADC sampling variables (happens continuously in loop)
+ unsigned long rawSampleCount = 0;
+ long rawSampleSum = 0;
+
+ // Potentiometer 2 range for mapping
+ const float POT2_MIN_MS = 100.0;      // 0.1 seconds = 100 ms
+ const float POT2_MAX_MS = 1000000.0;  // 1000 seconds = 1,000,000 ms
 
  void setup() {
    Serial.begin(9600);
@@ -44,29 +46,34 @@
    delay(100);
    Serial.println(F("Initialized"));
    tft.setRotation(1); // Set to landscape mode (effective: 320 wide, 240 tall)
-                       // Now tft.width() will be 320, tft.height() will be 240.
+                       // After this, tft.width() should be 320, tft.height() should be 240.
    tft.fillScreen(ST77XX_BLACK);
    delay(100);
    Serial.println("ready");
    tft.setFont(&FreeSerif12pt7b);
    tft.setTextWrap(false);
 
-   // After rotation, tft.width() is 320, tft.height() is 240.
+   // --- DEBUGGING DIMENSIONS ---
+   Serial.print("TFT Width (after rotation): ");
+   Serial.println(tft.width());
+   Serial.print("TFT Height (after rotation): ");
+   Serial.println(tft.height());
+   // --- END DEBUGGING ---
+
+   // NUM_POINTS will be based on the effective width after rotation (320 pixels)
    NUM_POINTS = tft.width() - WAVEFORM_X_OFFSET; // Use the actual effective width
 
-   // Allocate memory for both current and previous waveform data
+   // Allocate memory for the current waveform data
    values = (int *) malloc(NUM_POINTS * sizeof(int));
-   lastValues = (int *) malloc(NUM_POINTS * sizeof(int));
 
-   if (values == NULL || lastValues == NULL) {
-     Serial.println("Failed to allocate memory for waveform arrays!");
+   if (values == NULL) {
+     Serial.println("Failed to allocate memory for waveform array!");
      while (true); // Halt if memory allocation fails
    }
 
-   // Initialize arrays with a starting value (e.g., 0V at the bottom)
+   // Initialize array with a starting value (e.g., 0V at the bottom)
    for (int i = 0; i < NUM_POINTS; i++) {
      values[i] = tft.height() - 1 - Y_MARGIN_BOTTOM; // Initialize to 0V (bottom adjusted for margin)
-     lastValues[i] = tft.height() - 1 - Y_MARGIN_BOTTOM; // Same for last values
    }
 
    // Draw static elements (voltage markers) only once
@@ -77,8 +84,7 @@
    int markerCount = 4;
    // Effective screen height is tft.height() (e.g., 240 in landscape)
    // Adjusted plotting height for markers, accounting for top and bottom margins
-   int effectivePlotHeight = tft.height() - Y_MARGIN_TOP - Y_MARGIN_BOTTOM;
-
+   // Plotting area top: Y_MARGIN_TOP, Plotting area bottom: tft.height() - 1 - Y_MARGIN_BOTTOM
    for (int i = 0; i <= markerCount; i++) {
      float voltage = i * (3.3 / markerCount);
      // Map the voltage to a Y-coordinate within the effective plotting height
@@ -98,76 +104,66 @@
  }
 
  void loop() {
-   // Read analog values continuously
-   int analogValue = analogRead(potPin);
-   int analogValue2 = analogRead(potPin2);
+   unsigned long currentMillis = millis();
 
-   // Calculate sampling delay based on potPin2
-   float sampleDelay = pow(2, (analogValue2 / 4095.0) * log2(1000)) - 1;
-   if (sampleDelay < 1) sampleDelay = 1; // Ensure minimum 1ms delay
+   // --- Control msPerPoint based on potPin2 ---
+   // Map potPin2 (0-4095) logarithmically to msPerPoint (0.1s to 1000s)
+   // Using log scale for a better feel over such a wide range
+   float pot2Normalized = analogRead(potPin2) / 4095.0; // 0.0 to 1.0
+   msPerPoint = exp(pot2Normalized * log(POT2_MAX_MS / POT2_MIN_MS)) * POT2_MIN_MS;
+   msPerPoint = constrain(msPerPoint, POT2_MIN_MS, POT2_MAX_MS); // Ensure it stays within bounds
 
-   // Scale the analog value to fit the screen's effective plotting height
-   int scaledValue = map(analogValue, 0, 4095,
-                         tft.height() - 1 - Y_MARGIN_BOTTOM, // Bottom pixel of plotting area
-                         Y_MARGIN_TOP);                     // Top pixel of plotting area
+   // --- Raw ADC Reading and Accumulation (as fast as possible) ---
+   int rawAnalogValue = analogRead(potPin);
+   rawSampleSum += rawAnalogValue;
+   rawSampleCount++;
 
-   // --- Update Data (always happens) ---
-   // Store current 'values' into 'lastValues' BEFORE shifting 'values'
-   // This is crucial for the erase-draw technique to always have the previous frame
-   memmove(lastValues, values, NUM_POINTS * sizeof(int));
-
-   // Shift current data points and add new one
-   memmove(values, values + 1, (NUM_POINTS - 1) * sizeof(int));
-   values[NUM_POINTS - 1] = scaledValue;
-
-   // --- Determine Display Update Frequency ---
-   // Map sampleDelay to updateRateFactor
-   if (sampleDelay < DELAY_THRESHOLD_LOW) {
-     // For very fast sampling, update less often
-     updateRateFactor = map(sampleDelay, 1.0, DELAY_THRESHOLD_LOW, MAX_UPDATE_RATE_FACTOR, MIN_UPDATE_RATE_FACTOR);
-     updateRateFactor = constrain(updateRateFactor, MIN_UPDATE_RATE_FACTOR, MAX_UPDATE_RATE_FACTOR); // Ensure it's within bounds
-   } else if (sampleDelay > DELAY_THRESHOLD_HIGH) {
-     // For very slow sampling, update every iteration
-     updateRateFactor = MIN_UPDATE_RATE_FACTOR;
-   } else {
-     // Linear interpolation between MIN and MAX factors in the middle range
-     updateRateFactor = map(sampleDelay, DELAY_THRESHOLD_LOW, DELAY_THRESHOLD_HIGH, MAX_UPDATE_RATE_FACTOR, MIN_UPDATE_RATE_FACTOR);
-     updateRateFactor = constrain(updateRateFactor, MIN_UPDATE_RATE_FACTOR, MAX_UPDATE_RATE_FACTOR);
-   }
-
-   // --- Display Update Logic (conditional) ---
-   loopCounter++; // Increment the counter on each loop iteration
-
-   // Update display only if enough iterations have passed
-   if (loopCounter >= updateRateFactor) {
-     loopCounter = 0; // Reset the counter
-
-     // Erase the previous waveform by drawing it in black
-     // Draw slightly thicker to ensure complete erasure of old pixels
-     for (int i = 1; i < NUM_POINTS; i++) {
-       tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, lastValues[i - 1], i + WAVEFORM_X_OFFSET, lastValues[i], ST77XX_BLACK);
-       // Draw adjacent pixels for "thickness" to ensure erase
-       if (lastValues[i - 1] != lastValues[i]) {
-         tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, lastValues[i - 1] + 1, i + WAVEFORM_X_OFFSET, lastValues[i] + 1, ST77XX_BLACK);
-         tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, lastValues[i - 1] - 1, i + WAVEFORM_X_OFFSET, lastValues[i] - 1, ST77XX_BLACK);
-       }
+   // --- Check if it's time to add a new point to the graph ---
+   if (currentMillis - previousSampleMillis >= msPerPoint) {
+     // Calculate the average raw sample value for this point
+     int averagedAnalogValue = 0;
+     if (rawSampleCount > 0) {
+       averagedAnalogValue = rawSampleSum / rawSampleCount;
      }
+
+     // Reset accumulation for the next point
+     rawSampleSum = 0;
+     rawSampleCount = 0;
+     previousSampleMillis = currentMillis; // Set new reference point for next average
+
+     // Scale the averaged value to fit the screen's effective plotting height
+     int scaledValue = map(averagedAnalogValue, 0, 4095,
+                           tft.height() - 1 - Y_MARGIN_BOTTOM, // Bottom pixel of plotting area
+                           Y_MARGIN_TOP);                     // Top pixel of plotting area
+
+     // --- Update Graph Data ---
+     // Shift existing values to the left
+     memmove(values, values + 1, (NUM_POINTS - 1) * sizeof(int));
+     // Add the new scaled value to the end of the array
+     values[NUM_POINTS - 1] = scaledValue;
+
+     // --- Display Update (every time a new point is added) ---
+     // Clear the specific plotting area to prevent ghosting
+     tft.fillRect(WAVEFORM_X_OFFSET, Y_MARGIN_TOP, // X, Y start of the plotting area
+                  NUM_POINTS,                     // Width of plotting area
+                  tft.height() - Y_MARGIN_TOP - Y_MARGIN_BOTTOM, // Height of plotting area
+                  ST77XX_BLACK);
 
      // Draw the new waveform in white
      for (int i = 1; i < NUM_POINTS; i++) {
        tft.drawLine(i - 1 + WAVEFORM_X_OFFSET, values[i - 1], i + WAVEFORM_X_OFFSET, values[i], ST77XX_WHITE);
      }
 
-     // Serial output for debugging (only print when display updates)
-     Serial.print("Analog 1: ");
-     Serial.print(analogValue);
-     Serial.print(", Analog 2: ");
-     Serial.print(analogValue2);
-     Serial.print(", Sample Delay: ");
-     Serial.print(sampleDelay);
-     Serial.print(", Update Factor: ");
-     Serial.println(updateRateFactor);
+     // Serial output for debugging
+     Serial.print("Analog: ");
+     Serial.print(averagedAnalogValue);
+     Serial.print(", msPerPoint: ");
+     Serial.print(msPerPoint);
+     Serial.print(" (");
+     Serial.print(msPerPoint / 1000.0, 3); // Print in seconds
+     Serial.println("s)");
    }
 
-   delay(sampleDelay); // This delay controls the rate of data acquisition
+   // No delay() here. loop() runs as fast as the code inside it allows.
+   // Raw ADC readings are continuous, graph points are averaged over msPerPoint.
  }
